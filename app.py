@@ -98,7 +98,7 @@ if df is not None:
                 st.info(f"🧬 **SwissADME CYP Inhibisyonu**\n\n{row['Steroid_SwissADME_CYP_Inh']}")
                 
             with detay_col2:
-                st.info(f"🛡️ **ProTox-III Hepatotoksisite**\n\n{row['Ek_ilac_protox3_ht_durumu']}")
+                st.info(f"🛡️ **ProTox-III Hepatotoksisite**\n\n{row['Ek_Ilac_ProTox3_HT_Durumu']}")
 
             st.markdown("---")
             st.caption("💡 Not: Bu analiz in silico yöntemlerle elde edilen öngörüleri içerir. Klinik doğrulanma gerektirir.")
