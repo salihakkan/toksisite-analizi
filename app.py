@@ -47,7 +47,7 @@ df = load_data()
 if df is not None:
     # --- BAŞLIK VE GİRİŞ ---
     st.title("🧪 In Silico Toksisite Risk Analizi")
-    st.markdown("#### TÜBİTAK 2209-A Projesi | Eczacılık Araştırma Platformu")
+    st.markdown("#### Farmasötik Toksikoloji Araştırma Platformu")
     st.divider()
 
     # --- SEÇİM PANELİ ---
@@ -95,7 +95,7 @@ if df is not None:
             detay_col1, detay_col2 = st.columns(2)
             
             with detay_col1:
-                st.info(f"🧬 **SwissADME CYP Inhibisyonu**\n\n{row['Steroid_swissadme_cyp_inh']}")
+                st.info(f"🧬 **SwissADME CYP Inhibisyonu**\n\n{row['Steroid_SwissADME_CYP_Inh']}")
                 
             with detay_col2:
                 st.info(f"🛡️ **ProTox-III Hepatotoksisite**\n\n{row['Ek_ilac_protox3_ht_durumu']}")
