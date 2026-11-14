@@ -5,7 +5,7 @@ import pandas as pd
 st.set_page_config(
     page_title="In Silico Toksisite Analiz Sistemi",
     page_icon="💊",
-    layout="wide" # 3 kutu yan yana sığsın diye genişlettim
+    layout="wide"
 )
 
 # --- ÖZEL CSS ---
@@ -29,10 +29,10 @@ df = load_data()
 if df is not None:
     # --- BAŞLIK ---
     st.title("🧪 In Silico Toksisite Risk Analizi")
-    st.markdown("#### Farmasötik Toksikoloji Araştırma Platformu") # TÜBİTAK yazısı uçtu
+    st.markdown("#### İleri Düzey Farmakolojik Araştırma Platformu")
     st.divider()
 
-    # --- SEÇİM PANELİ (Artık 3 Kolon) ---
+    # --- SEÇİM PANELİ ---
     col1, col2, col3 = st.columns(3)
     
     with col1:
@@ -44,7 +44,6 @@ if df is not None:
         selected_drug = st.selectbox("Ek İlaç Seçiniz", options=drugs)
 
     with col3:
-        # İŞTE BURASI: DOZ SENARYOSU SEÇİM KUTUSU
         dosages = sorted(df['Doz_Senaryosu'].dropna().unique())
         selected_dose = st.selectbox("Doz Senaryosu Seçiniz", options=dosages)
         
@@ -53,7 +52,6 @@ if df is not None:
 
     # --- ANALİZ SONUÇLARI ---
     if analyze_btn:
-        # Artık 3 şarta (Steroid + İlaç + Doz) göre tam isabet filtreliyoruz!
         result = df[(df['Steroid_Adi'] == selected_steroid) & 
                     (df['Ek_Ilac_Adi'] == selected_drug) &
                     (df['Doz_Senaryosu'] == selected_dose)]
@@ -64,6 +62,7 @@ if df is not None:
             st.subheader(f"📋 Analiz Raporu: {selected_steroid} + {selected_drug}")
             st.caption(f"**Seçilen Doz Senaryosu:** {selected_dose}")
 
+            # Risk Sınıfı
             risk_class = str(row.get('Etiket_Sinerjistik_Risk_Sinifi', 'Risk Sınıfı Bulunamadı'))
             
             if "Yüksek" in risk_class or "Kritik" in risk_class:
@@ -73,19 +72,22 @@ if df is not None:
             else:
                 st.success(f"✅ **Genel Risk Sınıfı:** {risk_class}")
 
+            # YENİ EKLENEN: Kombinasyon Mekanizması
+            mekanizma = row.get('Kombinasyon_Mekanizmasi', 'Veri Bulunamadı')
+            st.info(f"⚙️ **Kombinasyon Mekanizması:** {mekanizma}")
+
             detay_col1, detay_col2 = st.columns(2)
             
+            # BURASI DÜZELTİLDİ: Orijinal Excel Başlıklarına Göre
             with detay_col1:
-                # DİKKAT: 'Steroid_swissadme_cyp_inh' kısmını az önce düzelttiğin isimle değiştir
-                swiss = row.get('Steroid_swissadme_cyp_inh', '⚠️ Veri Çekilemedi')
-                st.info(f"🧬 **SwissADME CYP Inhibisyonu**\n\n{swiss}")
+                swiss = row.get('Ek_Ilac_SwissADME_CYP_Inh', 'Veri Bulunamadı')
+                st.info(f"🧬 **Ek İlaç SwissADME CYP Inhibisyonu**\n\n{swiss}")
                 
             with detay_col2:
-                # DİKKAT: 'Ek_ilac_protox3_ht_durumu' kısmını az önce düzelttiğin isimle değiştir
-                protox = row.get('Ek_ilac_protox3_ht_durumu', '⚠️ Veri Çekilemedi')
-                st.info(f"🛡️ **ProTox-III Hepatotoksisite**\n\n{protox}")
+                protox = row.get('Ek_Ilac_ProTox3_HT_Durumu', 'Veri Bulunamadı')
+                st.info(f"🛡️ **Ek İlaç ProTox-III Hepatotoksisite**\n\n{protox}")
 
         else:
-            st.error("❌ Veri tabanında bu üçlü kombinasyona (Steroid + İlaç + Doz) ait bir kayıt bulunamadı.")
+            st.error("❌ Veri tabanında bu üçlü kombinasyona ait bir kayıt bulunamadı.")
 else:
     st.error("Veri tabanı dosyası yüklenemedi.")
