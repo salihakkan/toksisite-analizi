@@ -29,7 +29,7 @@ df = load_data()
 if df is not None:
     # --- BAŞLIK ---
     st.title("🧪 In Silico Toksisite Risk Analizi")
-    st.markdown("#### İleri Düzey Farmakolojik Araştırma Platformu")
+    st.markdown("#### Farmasötik Toksikoloji Araştırma Platformu")
     st.divider()
 
     # --- SEÇİM PANELİ ---
