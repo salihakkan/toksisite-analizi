@@ -80,52 +80,63 @@ def format_apa_authors(author_elements):
 
     return apa_authors, in_text_author
 
-# --- PUBMED CANLI TARAMA (SON 10 YIL + EN GÜNCELE GÖRE SIRALI + APA 7) ---
-def search_pubmed(term1, term2, max_per_query=4, years_back=10):
+# --- PUBMED CANLI TARAMA (HIZ SINIRI KORUMALI + SON 10 YIL + EN GÜNCELE SIRALI + APA 7) ---
+def search_pubmed(term1, term2, max_per_query=3, years_back=10):
     base_search = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
     base_fetch = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+    headers = {"User-Agent": "InSilicoToxPlatform/1.0 (academic-research)"}
     current_year = datetime.now().year
 
-    def run_queries(start_yr):
+    def safe_get(url, params, as_json=True):
+        for attempt in range(3):
+            try:
+                r = requests.get(url, params=params, headers=headers, timeout=12)
+                if r.status_code == 429:
+                    time.sleep(1.2 * (attempt + 1))
+                    continue
+                if r.status_code == 200:
+                    return r.json() if as_json else r.content
+            except Exception:
+                time.sleep(0.8)
+        return None
+
+    def run_queries(start_yr=None):
         found_pmids = []
         notes = []
+        date_filter = f' AND ("{start_yr}"[PDAT] : "{current_year}"[PDAT])' if start_yr else ""
         queries = [
-            (f"({term1}[Title/Abstract]) AND ({term2}[Title/Abstract])", "Doğrudan Kombinasyon"),
-            (f"({term1}[Title/Abstract]) AND (hepatotoxicity OR liver OR toxicity OR CYP450)", f"{term1} Toksisite"),
-            (f"({term2}[Title/Abstract]) AND (hepatotoxicity OR liver OR DILI OR CYP450)", f"{term2} Toksisite")
+            (f'({term1}) AND ({term2}){date_filter}', "Doğrudan Kombinasyon"),
+            (f'({term1}) AND (hepatotoxicity OR liver OR toxicity){date_filter}', f"{term1} Toksisite"),
+            (f'({term2}) AND (hepatotoxicity OR DILI OR liver toxicity){date_filter}', f"{term2} Toksisite")
         ]
         for idx, (q, label) in enumerate(queries):
-            if idx > 0 and len(found_pmids) >= 5:
-                break
-            try:
-                params = {
-                    "db": "pubmed",
-                    "term": q,
-                    "retmode": "json",
-                    "retmax": max_per_query,
-                    "sort": "relevance",
-                    "datetype": "pdat",
-                    "mindate": f"{start_yr}/01/01",
-                    "maxdate": f"{current_year}/12/31",
-                    "tool": "InSilicoToxPlatform"
-                }
-                resp = requests.get(base_search, params=params, timeout=10).json()
+            if idx > 0:
+                time.sleep(0.45)  # PubMed 3 istek/sn sınırına takılmamak için
+            params = {
+                "db": "pubmed",
+                "term": q,
+                "retmode": "json",
+                "retmax": max_per_query,
+                "sort": "relevance",
+                "tool": "InSilicoToxPlatform"
+            }
+            resp = safe_get(base_search, params, as_json=True)
+            if resp:
                 ids = resp.get("esearchresult", {}).get("idlist", [])
                 if ids:
                     notes.append(f"{label}: {len(ids)}")
                     for pmid in ids:
                         if pmid not in found_pmids:
                             found_pmids.append(pmid)
-            except Exception:
-                continue
         return found_pmids, notes
 
     start_year = current_year - years_back
     pmids, search_notes = run_queries(start_year)
     range_label = f"{start_year}–{current_year}"
 
-    # Son 10 yılda yeterli makale bulunamazsa otomatik olarak son 20 yıla genişlet
+    # Son 10 yılda yeterli makale bulunamazsa otomatik son 20 yıla genişlet
     if len(pmids) < 2:
+        time.sleep(0.6)
         fallback_start = current_year - 20
         pmids_20, notes_20 = run_queries(fallback_start)
         if len(pmids_20) > len(pmids):
@@ -133,20 +144,32 @@ def search_pubmed(term1, term2, max_per_query=4, years_back=10):
             search_notes = notes_20
             range_label = f"{fallback_start}–{current_year} (Son 10 yıl verisi kısıtlı olduğu için genişletildi)"
 
+    # Hâlâ sonuç yoksa tarih filtresiz son tarama yap
+    if not pmids:
+        time.sleep(0.6)
+        pmids_all, notes_all = run_queries(None)
+        if pmids_all:
+            pmids = pmids_all
+            search_notes = notes_all
+            range_label = "Tüm Yıllar (Güncel veri kısıtlı olduğu için genişletildi)"
+
     if not pmids:
         return [], f"PubMed üzerinde ({range_label}) eşleşen açık makale bulunamadı."
 
     articles = []
-    try:
-        fetch_params = {
-            "db": "pubmed",
-            "id": ",".join(pmids[:7]),
-            "retmode": "xml",
-            "tool": "InSilicoToxPlatform"
-        }
-        xml_data = requests.get(base_fetch, params=fetch_params, timeout=12).content
-        root = ET.fromstring(xml_data)
+    time.sleep(0.45)
+    fetch_params = {
+        "db": "pubmed",
+        "id": ",".join(pmids[:8]),
+        "retmode": "xml",
+        "tool": "InSilicoToxPlatform"
+    }
+    xml_data = safe_get(base_fetch, fetch_params, as_json=False)
+    if not xml_data:
+        return [], "PubMed makale detayları çekilirken geçici bağlantı hatası oluştu."
 
+    try:
+        root = ET.fromstring(xml_data)
         for article in root.findall(".//PubmedArticle"):
             pmid_el = article.find(".//MedlineCitation/PMID")
             title_el = article.find(".//ArticleTitle")
@@ -214,38 +237,49 @@ def search_pubmed(term1, term2, max_per_query=4, years_back=10):
                 "url": pubmed_url
             })
     except Exception as e:
-        return [], f"PubMed veri çekme hatası: {str(e)}"
+        return [], f"PubMed XML işleme hatası: {str(e)}"
 
     # En alakalı bulunan makaleleri en güncelden (2026 -> 2016) eskiye sırala
     articles.sort(key=lambda x: x["year_num"], reverse=True)
     summary_note = f"Tarih Aralığı: {range_label} | " + " • ".join(search_notes)
     return articles, summary_note
 
-# --- YAPAY ZEKA ÇIKTISINI BÖLÜMLEME ---
+# --- YAPAY ZEKA ÇIKTISINI GÜVENLİ BÖLÜMLEME ---
 def parse_ai_response(raw_text):
-    def extract_tag(tag, text):
-        m = re.search(rf"\[{tag}\](.*?)\[/{tag}\]", text, re.DOTALL | re.IGNORECASE)
+    def extract_tag(tag, text, allow_unclosed=False):
+        if allow_unclosed:
+            m = re.search(rf"\[{tag}\](.*?)(?:\[/{tag}\]|$)", text, re.DOTALL | re.IGNORECASE)
+        else:
+            m = re.search(rf"\[{tag}\](.*?)\[/{tag}\]", text, re.DOTALL | re.IGNORECASE)
         return m.group(1).strip() if m else ""
 
     risk_level = extract_tag("RISK_SINIFI", raw_text)
     risk_summary = extract_tag("RISK_OZET", raw_text)
-    report = extract_tag("RAPOR", raw_text)
     notes_block = extract_tag("MAKALE_NOTLARI", raw_text)
+    report = extract_tag("RAPOR", raw_text, allow_unclosed=True)
+
+    # Eğer [RAPOR] etiketi hiç bulunamazsa ham metinden üst etiketleri temizleyip raporu kurtar
+    if not report:
+        cleaned = raw_text
+        for tag in ["RISK_SINIFI", "RISK_OZET", "MAKALE_NOTLARI"]:
+            cleaned = re.sub(rf"\[{tag}\].*?\[/{tag}\]", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+        report = cleaned.strip()
+
+    # Rapor içine sızmış olabilecek her türlü iç etiketi kesin olarak sil
+    for tag in ["RISK_SINIFI", "RISK_OZET", "MAKALE_NOTLARI"]:
+        report = re.sub(rf"\[{tag}\].*?\[/{tag}\]", "", report, flags=re.DOTALL | re.IGNORECASE)
+    report = re.sub(r"\[/?(?:RISK_SINIFI|RISK_OZET|MAKALE_NOTLARI|RAPOR)\]", "", report, flags=re.IGNORECASE).strip()
 
     article_reasons = {}
     if notes_block:
         for line in notes_block.splitlines():
-            line = line.strip().lstrip("-*• ")
-            m = re.match(r"(?:PMID\s*[:#-]?\s*)?(\d+)\s*[:\-–—]\s*(.+)", line, re.IGNORECASE)
+            m = re.match(r"[\s\-\*•]*(?:PMID\s*[:#-]?\s*)?(\d{5,9})[\*\s]*[:\-–—]\s*(.+)", line, re.IGNORECASE)
             if m:
-                article_reasons[m.group(1).strip()] = m.group(2).strip()
-
-    if not report:
-        report = raw_text
+                article_reasons[m.group(1).strip()] = m.group(2).strip().strip("*")
 
     return {
-        "risk_level": risk_level,
-        "risk_summary": risk_summary,
+        "risk_level": risk_level.strip("* "),
+        "risk_summary": risk_summary.strip("* "),
         "report": report,
         "article_reasons": article_reasons
     }
@@ -275,7 +309,7 @@ Sen uzman bir klinik toksikolog ve farmakologsun. Aşağıdaki iki madde arasın
 **PubMed Canlı Literatür Taraması Sonuçları (En güncelden eskiye):**
 {lit_text}
 
-**ÇIKTI FORMATI (Aşağıdaki 4 etiketi KESİNLİKLE eksiksiz kullan):**
+**ÇIKTI FORMATI (Aşağıdaki 4 etiketi açıp kapatarak KESİNLİKLE eksiksiz kullan):**
 
 [RISK_SINIFI]
 Sadece şu dördünden birini yaz: Kritik Risk, Yüksek Risk, Orta Risk veya Düşük Risk (Güvenli Profil)
@@ -286,7 +320,7 @@ Bu risk sınıfının verilme nedenini tek, çarpıcı ve bilimsel bir cümleyle
 [/RISK_OZET]
 
 [MAKALE_NOTLARI]
-Yukarıda verilen her bir PMID için, o makalenin bu analizle ne kadar uyumlu olduğunu ve neden kaynak olarak değerlendirildiğini (veya doğrudan kombinasyon yerine tekil madde verisi sunduğunu) 1 kısa cümleyle alt alta şu formatta yaz:
+Yukarıda verilen her bir PMID için, o makalenin bu analizle ne kadar uyumlu olduğunu ve neden kaynak olarak seçildiğini 1 kısa cümleyle alt alta şu formatta yaz:
 PMID_NUMARASI: Kısa seçim/uyumluluk nedeni.
 [/MAKALE_NOTLARI]
 
@@ -396,11 +430,12 @@ def render_risk_banner(risk_level, risk_summary=""):
 
 # --- APA 7 KAYNAKÇA + SEÇİM NEDENİ GÖSTERİM YARDIMCISI ---
 def render_bibliography(articles, note, article_reasons):
-    if not articles:
-        return
     st.divider()
-    st.markdown(f"### 📖 Kaynakça (APA 7 Formatı — En Güncelden Eskiye)")
+    st.markdown("### 📖 Kaynakça (APA 7 Formatı — En Güncelden Eskiye)")
     st.caption(note)
+    if not articles:
+        st.info("Bu sorgu için PubMed'den makale çekilemedi. Etken madde adlarını İngilizce olarak kontrol edip tekrar deneyebilirsiniz.")
+        return
     for idx, art in enumerate(articles, 1):
         st.markdown(f"{idx}. {art['apa']}")
         reason = article_reasons.get(art["pmid"])
@@ -510,13 +545,8 @@ with tab2:
                     st.subheader(f"📋 Canlı Analiz Raporu: {custom_sub1.strip()} + {custom_sub2.strip()}")
                     st.caption(f"**Seçilen Senaryo:** {custom_scenario} | **Aktif AI Modeli:** `{ai_res['model']}`")
 
-                    # İlk olarak renkli Risk Kartı (Güvenli / Orta / Yüksek / Kritik)
                     render_risk_banner(ai_res["risk_level"], ai_res["risk_summary"])
-
-                    # Ardından detaylı bilimsel rapor
                     st.markdown(ai_res["report"])
-
-                    # En altta en güncelden eskiye APA 7 kaynakça + seçim nedenleri
                     render_bibliography(articles, note, ai_res["article_reasons"])
                 else:
                     st.error(ai_res["error"])
