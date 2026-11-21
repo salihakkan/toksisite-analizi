@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import requests
 import re
+import time
+from datetime import datetime
 import xml.etree.ElementTree as ET
 from google import genai
 
@@ -62,7 +64,6 @@ def format_apa_authors(author_elements):
     if not formatted_authors:
         return "Yazar Bilinmiyor", "Anonim"
 
-    # Metin içi atıf (In-text citation) formatı
     if len(raw_last_names) == 1:
         in_text_author = raw_last_names[0]
     elif len(raw_last_names) == 2:
@@ -70,7 +71,6 @@ def format_apa_authors(author_elements):
     else:
         in_text_author = f"{raw_last_names[0]} et al."
 
-    # Kaynakça (APA 7) yazar listesi formatı
     if len(formatted_authors) == 1:
         apa_authors = formatted_authors[0]
     elif len(formatted_authors) <= 20:
@@ -80,43 +80,61 @@ def format_apa_authors(author_elements):
 
     return apa_authors, in_text_author
 
-# --- PUBMED CANLI LİTERATÜR TARAMA & APA 7 OLUŞTURMA ---
-def search_pubmed(term1, term2, max_per_query=4):
+# --- PUBMED CANLI TARAMA (SON 10 YIL + EN GÜNCELE GÖRE SIRALI + APA 7) ---
+def search_pubmed(term1, term2, max_per_query=4, years_back=10):
     base_search = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
     base_fetch = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-    pmids = []
-    search_notes = []
+    current_year = datetime.now().year
 
-    queries = [
-        (f"({term1}[Title/Abstract]) AND ({term2}[Title/Abstract])", "Doğrudan Kombinasyon Taraması"),
-        (f"({term1}[Title/Abstract]) AND (hepatotoxicity OR liver OR toxicity OR CYP450)", f"{term1} Toksisite Literatürü"),
-        (f"({term2}[Title/Abstract]) AND (hepatotoxicity OR liver OR DILI OR CYP450)", f"{term2} Toksisite Literatürü")
-    ]
+    def run_queries(start_yr):
+        found_pmids = []
+        notes = []
+        queries = [
+            (f"({term1}[Title/Abstract]) AND ({term2}[Title/Abstract])", "Doğrudan Kombinasyon"),
+            (f"({term1}[Title/Abstract]) AND (hepatotoxicity OR liver OR toxicity OR CYP450)", f"{term1} Toksisite"),
+            (f"({term2}[Title/Abstract]) AND (hepatotoxicity OR liver OR DILI OR CYP450)", f"{term2} Toksisite")
+        ]
+        for idx, (q, label) in enumerate(queries):
+            if idx > 0 and len(found_pmids) >= 5:
+                break
+            try:
+                params = {
+                    "db": "pubmed",
+                    "term": q,
+                    "retmode": "json",
+                    "retmax": max_per_query,
+                    "sort": "relevance",
+                    "datetype": "pdat",
+                    "mindate": f"{start_yr}/01/01",
+                    "maxdate": f"{current_year}/12/31",
+                    "tool": "InSilicoToxPlatform"
+                }
+                resp = requests.get(base_search, params=params, timeout=10).json()
+                ids = resp.get("esearchresult", {}).get("idlist", [])
+                if ids:
+                    notes.append(f"{label}: {len(ids)}")
+                    for pmid in ids:
+                        if pmid not in found_pmids:
+                            found_pmids.append(pmid)
+            except Exception:
+                continue
+        return found_pmids, notes
 
-    for idx, (q, label) in enumerate(queries):
-        if idx > 0 and len(pmids) >= 4:
-            break
-        try:
-            params = {
-                "db": "pubmed",
-                "term": q,
-                "retmode": "json",
-                "retmax": max_per_query,
-                "sort": "relevance",
-                "tool": "InSilicoToxPlatform"
-            }
-            resp = requests.get(base_search, params=params, timeout=10).json()
-            ids = resp.get("esearchresult", {}).get("idlist", [])
-            if ids:
-                search_notes.append(f"{label}: {len(ids)} makale")
-                for pmid in ids:
-                    if pmid not in pmids:
-                        pmids.append(pmid)
-        except Exception:
-            continue
+    start_year = current_year - years_back
+    pmids, search_notes = run_queries(start_year)
+    range_label = f"{start_year}–{current_year}"
+
+    # Son 10 yılda yeterli makale bulunamazsa otomatik olarak son 20 yıla genişlet
+    if len(pmids) < 2:
+        fallback_start = current_year - 20
+        pmids_20, notes_20 = run_queries(fallback_start)
+        if len(pmids_20) > len(pmids):
+            pmids = pmids_20
+            search_notes = notes_20
+            range_label = f"{fallback_start}–{current_year} (Son 10 yıl verisi kısıtlı olduğu için genişletildi)"
 
     if not pmids:
-        return [], "PubMed üzerinde bu maddelerle eşleşen açık makale bulunamadı."
+        return [], f"PubMed üzerinde ({range_label}) eşleşen açık makale bulunamadı."
 
     articles = []
     try:
@@ -145,11 +163,9 @@ def search_pubmed(term1, term2, max_per_query=4):
             pmid = pmid_el.text.strip() if pmid_el is not None and pmid_el.text else "Bilinmiyor"
             pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
 
-            # Başlık temizliği
             raw_title = "".join(title_el.itertext()).strip() if title_el is not None else "Başlık Mevcut Değil"
             clean_title = raw_title.rstrip(".")
 
-            # Yıl bilgisi
             if year_el is not None and year_el.text:
                 year = year_el.text.strip()
             elif medline_date_el is not None and medline_date_el.text:
@@ -158,7 +174,8 @@ def search_pubmed(term1, term2, max_per_query=4):
             else:
                 year = "t.y."
 
-            # Dergi, Cilt, Sayı, Sayfa
+            year_num = int(year) if year.isdigit() else 0
+
             journal = journal_el.text.strip() if journal_el is not None and journal_el.text else "PubMed Indexed Journal"
             vol = vol_el.text.strip() if vol_el is not None and vol_el.text else ""
             issue = issue_el.text.strip() if issue_el is not None and issue_el.text else ""
@@ -168,7 +185,6 @@ def search_pubmed(term1, term2, max_per_query=4):
             apa_authors, in_text_author = format_apa_authors(author_els)
             in_text_cite = f"({in_text_author}, {year})"
 
-            # APA 7 Kaynakça Dizgisi Oluşturma
             journal_part = f"*{journal}*"
             if vol and issue:
                 journal_part += f", *{vol}*({issue})"
@@ -185,7 +201,6 @@ def search_pubmed(term1, term2, max_per_query=4):
                 link_part = f"[{pubmed_url}]({pubmed_url})"
 
             apa_reference = f"{apa_authors} ({year}). {clean_title}. {journal_part} {link_part}"
-
             abstract = " ".join(["".join(el.itertext()) for el in abstract_els]) if abstract_els else "Özet metni mevcut değil."
 
             articles.append({
@@ -194,23 +209,56 @@ def search_pubmed(term1, term2, max_per_query=4):
                 "apa": apa_reference,
                 "title": clean_title,
                 "year": year,
+                "year_num": year_num,
                 "abstract": abstract[:1500],
                 "url": pubmed_url
             })
     except Exception as e:
         return [], f"PubMed veri çekme hatası: {str(e)}"
 
-    return articles, " | ".join(search_notes)
+    # En alakalı bulunan makaleleri en güncelden (2026 -> 2016) eskiye sırala
+    articles.sort(key=lambda x: x["year_num"], reverse=True)
+    summary_note = f"Tarih Aralığı: {range_label} | " + " • ".join(search_notes)
+    return articles, summary_note
 
-# --- GEMINI AI SENTEZ FONKSİYONU ---
+# --- YAPAY ZEKA ÇIKTISINI BÖLÜMLEME ---
+def parse_ai_response(raw_text):
+    def extract_tag(tag, text):
+        m = re.search(rf"\[{tag}\](.*?)\[/{tag}\]", text, re.DOTALL | re.IGNORECASE)
+        return m.group(1).strip() if m else ""
+
+    risk_level = extract_tag("RISK_SINIFI", raw_text)
+    risk_summary = extract_tag("RISK_OZET", raw_text)
+    report = extract_tag("RAPOR", raw_text)
+    notes_block = extract_tag("MAKALE_NOTLARI", raw_text)
+
+    article_reasons = {}
+    if notes_block:
+        for line in notes_block.splitlines():
+            line = line.strip().lstrip("-*• ")
+            m = re.match(r"(?:PMID\s*[:#-]?\s*)?(\d+)\s*[:\-–—]\s*(.+)", line, re.IGNORECASE)
+            if m:
+                article_reasons[m.group(1).strip()] = m.group(2).strip()
+
+    if not report:
+        report = raw_text
+
+    return {
+        "risk_level": risk_level,
+        "risk_summary": risk_summary,
+        "report": report,
+        "article_reasons": article_reasons
+    }
+
+# --- GEMINI AI SENTEZ FONKSİYONU (AKILLI YEDEKLEMELİ) ---
 def generate_ai_report(substance1, substance2, scenario, articles, in_silico_context=None):
     api_key = st.secrets.get("GEMINI_API_KEY", None)
     if not api_key:
-        return "⚠️ Streamlit Secrets içinde 'GEMINI_API_KEY' bulunamadı. Lütfen ayarları kontrol edin."
+        return {"ok": False, "error": "⚠️ Streamlit Secrets içinde 'GEMINI_API_KEY' bulunamadı."}
 
     if articles:
         lit_text = "\n\n".join([
-            f"- Metin İçi Atıf Kodu: {a['in_text']} | PMID: {a['pmid']}\n  Başlık: {a['title']}\n  Özet: {a['abstract']}"
+            f"- PMID: {a['pmid']} | Atıf Kodu: {a['in_text']} | Yıl: {a['year']}\n  Başlık: {a['title']}\n  Özet: {a['abstract']}"
             for a in articles
         ])
     else:
@@ -224,21 +272,42 @@ Sen uzman bir klinik toksikolog ve farmakologsun. Aşağıdaki iki madde arasın
 **İncelenen Maddeler:** {substance1} + {substance2}
 **Kullanım / Doz Senaryosu:** {scenario}
 {silico_block}
-**PubMed Canlı Literatür Taraması Sonuçları:**
+**PubMed Canlı Literatür Taraması Sonuçları (En güncelden eskiye):**
 {lit_text}
 
-**Raporlama Kuralları:**
-1. **Genel Toksikolojik Değerlendirme:** Bu kombinasyonun ve maruziyet senaryosunun (özellikle kronik veya yüksek doz ise kümülatif ya da idiyosinkratik etkilerin) risk profilini özetle.
-2. **Farmakokinetik & Farmakodinamik Mekanizma:** CYP450 enzimleri, safra yolu/kolestaz, oksidatif stres veya taşıyıcı proteinler üzerinden olası mekanizmaları açıkla. Eğer In Silico verilerde CYP inhibisyonu veya ProTox-III negatif görünmesine rağmen risk yüksekse, bunun bilimsel nedenini (kronik birikim, idiyosinkratik DILI vb.) netleştir.
-3. **APA 7 Metin İçi Atıf Zorunluluğu:** Yukarıda verilen makalelerden bilgi kullanırken cümle sonlarında mutlaka yukarıda belirtilen APA metin içi atıf kodunu kullan — örneğin: **(Smith et al., 2023)**. Doğrudan birlikte kullanım çalışması yoksa bunu açıkça belirt ve her iki maddenin bireysel toksisite kanıtlarından çıkarım yap; asla listede olmayan bir kaynak uydurma.
-4. Raporun sonuna ayrıca kaynakça listesi ekleme (sistem aşağıda otomatik APA 7 kaynakça listesini tıklanabilir linklerle basacaktır).
+**ÇIKTI FORMATI (Aşağıdaki 4 etiketi KESİNLİKLE eksiksiz kullan):**
+
+[RISK_SINIFI]
+Sadece şu dördünden birini yaz: Kritik Risk, Yüksek Risk, Orta Risk veya Düşük Risk (Güvenli Profil)
+[/RISK_SINIFI]
+
+[RISK_OZET]
+Bu risk sınıfının verilme nedenini tek, çarpıcı ve bilimsel bir cümleyle özetle.
+[/RISK_OZET]
+
+[MAKALE_NOTLARI]
+Yukarıda verilen her bir PMID için, o makalenin bu analizle ne kadar uyumlu olduğunu ve neden kaynak olarak değerlendirildiğini (veya doğrudan kombinasyon yerine tekil madde verisi sunduğunu) 1 kısa cümleyle alt alta şu formatta yaz:
+PMID_NUMARASI: Kısa seçim/uyumluluk nedeni.
+[/MAKALE_NOTLARI]
+
+[RAPOR]
+Buraya iki ana başlık halinde detaylı analizi yaz:
+### 1. Genel Toksikolojik Değerlendirme
+Kombinasyonun ve maruziyet senaryosunun (kronik birikim, kümülatif veya idiyosinkratik etkiler) risk profilini özetle.
+
+### 2. Farmakokinetik ve Farmakodinamik Mekanizma
+CYP450 enzimleri, kolestaz/safra yolu, oksidatif stres veya taşıyıcı proteinler üzerinden mekanizmaları açıkla. In Silico veriler negatif görünmesine rağmen risk yüksekse bunun bilimsel nedenini (kronik maruziyet, idiyosinkratik DILI vb.) netleştir.
+
+Kurallar:
+- Metin içinde yukarıdaki makalelerden bilgi verirken mutlaka verilen APA metin içi atıf kodunu kullan — örneğin: **(Yazar et al., 2024)**.
+- Asla listede olmayan bir makale uydurma; doğrudan ikili çalışma yoksa bireysel kanıtlardan çıkarım yaptığını belirt.
+- Rapor sonuna ayrıca kaynakça listesi ekleme (sistem otomatik basacaktır).
+[/RAPOR]
 """
 
-    import time
     try:
         client = genai.Client(api_key=api_key)
 
-        # API anahtarına açık tüm uygun Gemini modellerini canlı listele
         candidate_models = []
         try:
             for m in client.models.list():
@@ -258,7 +327,6 @@ Sen uzman bir klinik toksikolog ve farmakologsun. Aşağıdaki iki madde arasın
         except Exception:
             candidate_models = ["gemini-3.8-flash"]
 
-        # Yoğunluğa takılmamak için önce lite ve alternatif flash modellerini öne al
         def model_priority(name):
             n = name.lower()
             if "lite" in n and "preview" not in n:
@@ -280,7 +348,6 @@ Sen uzman bir klinik toksikolog ve farmakologsun. Aşağıdaki iki madde arasın
             candidate_models = ["gemini-3.8-flash"]
 
         last_error = ""
-        # Uygun modelleri sırayla dene; 503/yoğunluk hatasında anında diğerine geç
         for model_name in candidate_models[:6]:
             for attempt in range(2):
                 try:
@@ -289,7 +356,10 @@ Sen uzman bir klinik toksikolog ve farmakologsun. Aşağıdaki iki madde arasın
                         contents=prompt
                     )
                     if response and response.text:
-                        return f"*(Aktif AI Modeli: `{model_name}`)*\n\n{response.text}"
+                        parsed = parse_ai_response(response.text)
+                        parsed["ok"] = True
+                        parsed["model"] = model_name
+                        return parsed
                 except Exception as e:
                     last_error = f"{model_name}: {str(e)}"
                     err_str = str(e)
@@ -299,9 +369,43 @@ Sen uzman bir klinik toksikolog ve farmakologsun. Aşağıdaki iki madde arasın
                             continue
                     break
 
-        return f"❌ Uygun modeller şu an meşgul. Denenenler: {', '.join(candidate_models[:6])}\n\nSon hata: {last_error}"
+        return {
+            "ok": False,
+            "error": f"❌ Uygun modeller şu an meşgul. Denenenler: {', '.join(candidate_models[:6])}\n\nSon hata: {last_error}"
+        }
     except Exception as e:
-        return f"❌ Yapay zeka analizi sırasında bir hata oluştu: {str(e)}"
+        return {"ok": False, "error": f"❌ Yapay zeka analizi sırasında bir hata oluştu: {str(e)}"}
+
+# --- RİSK KARTI GÖSTERİM YARDIMCISI ---
+def render_risk_banner(risk_level, risk_summary=""):
+    if not risk_level:
+        return
+    text = f"**Yapay Zeka Risk Sınıflandırması:** {risk_level}"
+    if risk_summary:
+        text += f"\n\n{risk_summary}"
+
+    lower = risk_level.lower()
+    if "kritik" in lower or "yüksek" in lower:
+        st.error(f"🚨 {text}")
+    elif "orta" in lower:
+        st.warning(f"⚠️ {text}")
+    elif "düşük" in lower or "güvenli" in lower:
+        st.success(f"✅ {text}")
+    else:
+        st.info(f"ℹ️ {text}")
+
+# --- APA 7 KAYNAKÇA + SEÇİM NEDENİ GÖSTERİM YARDIMCISI ---
+def render_bibliography(articles, note, article_reasons):
+    if not articles:
+        return
+    st.divider()
+    st.markdown(f"### 📖 Kaynakça (APA 7 Formatı — En Güncelden Eskiye)")
+    st.caption(note)
+    for idx, art in enumerate(articles, 1):
+        st.markdown(f"{idx}. {art['apa']}")
+        reason = article_reasons.get(art["pmid"])
+        if reason:
+            st.caption(f"🎯 **Seçim / Uyumluluk Nedeni:** {reason}")
 
 # --- ANA UYGULAMA ARAYÜZÜ ---
 st.title("🧪 In Silico & AI Toksisite Risk Analizi")
@@ -358,7 +462,7 @@ with tab1:
             st.divider()
             st.markdown("### 🤖 Yapay Zeka & Canlı PubMed Literatür Sentezi")
             if st.button("📚 PubMed Literatürü Tara & AI Yorumu Oluştur", key="ai_btn_tab1"):
-                with st.spinner("PubMed veri tabanı taranıyor ve APA 7 kaynakçalı bilimsel sentez hazırlanıyor..."):
+                with st.spinner("Son 10 yılın PubMed literatürü taranıyor ve bilimsel sentez hazırlanıyor..."):
                     articles, note = search_pubmed(selected_steroid, selected_drug)
                     silico_summary = (
                         f"- Etiketlenen Risk Sınıfı: {risk_class}\n"
@@ -366,16 +470,15 @@ with tab1:
                         f"- Ek İlaç SwissADME CYP İnhibisyonu: {swiss}\n"
                         f"- Ek İlaç ProTox-III Hepatotoksisite: {protox}"
                     )
-                    ai_output = generate_ai_report(
+                    ai_res = generate_ai_report(
                         selected_steroid, selected_drug, selected_dose, articles, silico_summary
                     )
-                    st.markdown(ai_output)
-
-                    if articles:
-                        st.divider()
-                        st.markdown(f"### 📖 Kaynakça (APA 7 Formatı — {note})")
-                        for idx, art in enumerate(articles, 1):
-                            st.markdown(f"{idx}. {art['apa']}")
+                    if ai_res["ok"]:
+                        st.caption(f"*(Aktif AI Modeli: `{ai_res['model']}`)*")
+                        st.markdown(ai_res["report"])
+                        render_bibliography(articles, note, ai_res["article_reasons"])
+                    else:
+                        st.error(ai_res["error"])
         else:
             st.warning("❌ Veri tabanında bu üçlü kombinasyona ait kayıt bulunamadı. Yan sekmeden canlı sorgulama yapabilirsiniz.")
     else:
@@ -383,12 +486,12 @@ with tab1:
 
 # === SEKME 2: VERİ SETİNDE OLMAYAN MADDELER İÇİN CANLI SORGU ===
 with tab2:
-    st.markdown("Veri setinizde yer almayan herhangi iki etken maddeyi yazarak doğrudan **PubMed + Yapay Zeka** üzerinden anlık ön risk taraması ve APA kaynakçası üretebilirsiniz.")
+    st.markdown("Veri setinizde yer almayan herhangi iki etken maddeyi yazarak doğrudan **PubMed (Son 10 Yıl) + Yapay Zeka** üzerinden anlık ön risk taraması yapabilirsiniz.")
     s_col1, s_col2, s_col3 = st.columns(3)
     with s_col1:
         custom_sub1 = st.text_input("1. Etken Madde (İngilizce önerilir)", placeholder="Örn: Trenbolone")
     with s_col2:
-        custom_sub2 = st.text_input("2. Etken Madde (İngilizce önerilir)", placeholder="Örn: Isotretinoin")
+        custom_sub2 = st.text_input("2. Etken Madde (İngilizce önerilir)", placeholder="Örn: Paracetamol")
     with s_col3:
         custom_scenario = st.selectbox(
             "Maruziyet Senaryosu",
@@ -397,17 +500,25 @@ with tab2:
 
     if st.button("🚀 Canlı Literatür Tara ve Analiz Et", key="ai_btn_tab2"):
         if custom_sub1.strip() and custom_sub2.strip():
-            with st.spinner(f"{custom_sub1} + {custom_sub2} için PubMed taranıyor..."):
+            with st.spinner(f"{custom_sub1} + {custom_sub2} için son 10 yılın PubMed literatürü taranıyor..."):
                 articles, note = search_pubmed(custom_sub1.strip(), custom_sub2.strip())
-                ai_output = generate_ai_report(
+                ai_res = generate_ai_report(
                     custom_sub1.strip(), custom_sub2.strip(), custom_scenario, articles
                 )
-                st.markdown(ai_output)
-
-                if articles:
+                if ai_res["ok"]:
                     st.divider()
-                    st.markdown(f"### 📖 Kaynakça (APA 7 Formatı — {note})")
-                    for idx, art in enumerate(articles, 1):
-                        st.markdown(f"{idx}. {art['apa']}")
+                    st.subheader(f"📋 Canlı Analiz Raporu: {custom_sub1.strip()} + {custom_sub2.strip()}")
+                    st.caption(f"**Seçilen Senaryo:** {custom_scenario} | **Aktif AI Modeli:** `{ai_res['model']}`")
+
+                    # İlk olarak renkli Risk Kartı (Güvenli / Orta / Yüksek / Kritik)
+                    render_risk_banner(ai_res["risk_level"], ai_res["risk_summary"])
+
+                    # Ardından detaylı bilimsel rapor
+                    st.markdown(ai_res["report"])
+
+                    # En altta en güncelden eskiye APA 7 kaynakça + seçim nedenleri
+                    render_bibliography(articles, note, ai_res["article_reasons"])
+                else:
+                    st.error(ai_res["error"])
         else:
             st.warning("Lütfen her iki etken madde kutusunu da doldurun.")
