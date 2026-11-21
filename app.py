@@ -237,7 +237,7 @@ Sen uzman bir klinik toksikolog ve farmakologsun. Aşağıdaki iki madde arasın
     try:
         client = genai.Client(api_key=api_key)
         response = client.models.generate_content(
-            model="gemini-3.0-flash",
+            model="gemini-3.8-flash",
             contents=prompt
         )
         return response.text
