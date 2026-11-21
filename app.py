@@ -444,7 +444,7 @@ def render_bibliography(articles, note, article_reasons):
 
 # --- ANA UYGULAMA ARAYÜZÜ ---
 st.title("🧪 In Silico & AI Toksisite Risk Analizi")
-st.markdown("#### İleri Düzey Farmakolojik Araştırma ve Canlı Literatür Platformu")
+st.markdown("#### SEDEFE AŞIGIM ")
 
 df = load_data()
 
