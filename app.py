@@ -29,6 +29,56 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+# --- YAYGIN TÜRKÇE -> İNGİLİZCE FARMAKOLOJİK SÖZLÜK (HIZLI ÖNBELLEK) ---
+PHARMA_TR_EN = {
+    "boldenon": "Boldenone",
+    "testosteron": "Testosterone",
+    "testosteron enantat": "Testosterone enanthate",
+    "testosteron propionat": "Testosterone propionate",
+    "testosteron sipionat": "Testosterone cypionate",
+    "nandrolon": "Nandrolone",
+    "nandrolon dekanoat": "Nandrolone decanoate",
+    "trenbolon": "Trenbolone",
+    "trenbolon asetat": "Trenbolone acetate",
+    "stanozolol": "Stanozolol",
+    "oksandrolon": "Oxandrolone",
+    "oksimetolon": "Oxymetholone",
+    "metandrostenolon": "Methandrostenolone",
+    "metandienon": "Metandienone",
+    "drostanolon": "Drostanolone",
+    "metenolon": "Metenolone",
+    "parasetamol": "Paracetamol",
+    "asetaminofen": "Acetaminophen",
+    "amoksisilin klavulanik asit": "Amoxicillin clavulanic acid",
+    "amoksisilin/klavulanik asit": "Amoxicillin clavulanic acid",
+    "amoksisilin": "Amoxicillin",
+    "torasemid": "Torasemide",
+    "furosemid": "Furosemide",
+    "ibuprofen": "Ibuprofen",
+    "diklofenak": "Diclofenac",
+    "naproksen": "Naproxen",
+    "izotretinoin": "Isotretinoin",
+    "atorvastatin": "Atorvastatin",
+    "rosuvastatin": "Rosuvastatin",
+    "simvastatin": "Simvastatin",
+    "metformin": "Metformin",
+    "fluoksetin": "Fluoxetine",
+    "sertralin": "Sertraline",
+    "ketokonazol": "Ketoconazole",
+    "flukonazol": "Fluconazole",
+    "azitromisin": "Azithromycin",
+    "klaritromisin": "Clarithromycin",
+    "siprofloksasin": "Ciprofloxacin",
+    "tamoksifen": "Tamoxifen",
+    "klomifen": "Clomiphene",
+    "anastrozol": "Anastrozole",
+    "letrozol": "Letrozole",
+    "spironolakton": "Spironolactone",
+    "etanol": "Ethanol",
+    "alkol": "Alcohol",
+    "kafein": "Caffeine",
+}
+
 # --- VERİ YÜKLEME ---
 @st.cache_data
 def load_data():
@@ -36,6 +86,100 @@ def load_data():
         return pd.read_csv('evren_format1_105_satir.csv')
     except FileNotFoundError:
         return None
+
+# --- MODEL ÖNCELİK SIRALAMASI (EN GÜÇLÜDEN HAFİFE) ---
+def model_strength_priority(name):
+    n = name.lower()
+    if any(x in n for x in ["argon", "carbon", "pro"]) and "preview" not in n:
+        return 0
+    if "hydrogen" in n and "lite" not in n:
+        return 1
+    if any(x in n for x in ["argon", "carbon", "pro"]):
+        return 2
+    if "flash" in n and "lite" not in n and "preview" not in n:
+        return 3
+    if "flash" in n and "lite" not in n:
+        return 4
+    if "lite" in n and "preview" not in n:
+        return 5
+    if "lite" in n:
+        return 6
+    return 7
+
+# --- API'YE AÇIK MODELLERİ CANLI LİSTELE (10 DK ÖNBELLEKLİ) ---
+@st.cache_data(ttl=600, show_spinner=False)
+def get_available_models():
+    api_key = st.secrets.get("GEMINI_API_KEY", None)
+    if not api_key:
+        return []
+    try:
+        client = genai.Client(api_key=api_key)
+        models = []
+        for m in client.models.list():
+            short_name = getattr(m, "name", "").replace("models/", "")
+            actions = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", None) or []
+            lower_name = short_name.lower()
+
+            is_gemini = "gemini" in lower_name
+            is_excluded = any(x in lower_name for x in [
+                "embedding", "imagen", "veo", "tts", "audio", "image",
+                "aqa", "robotics", "computer-use", "live", "deep-research"
+            ])
+            supports_gen = (not actions) or ("generateContent" in actions)
+
+            if is_gemini and not is_excluded and supports_gen:
+                models.append(short_name)
+
+        models = sorted(list(dict.fromkeys(models)), key=model_strength_priority)
+        return models
+    except Exception:
+        return ["gemini-3.8-flash"]
+
+# --- OTOMATİK TÜRKÇE -> İNGİLİZCE FARMAKOLOJİK AD ÇEVİRİSİ ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def translate_drug_for_pubmed(term, available_models):
+    clean = term.strip()
+    if not clean:
+        return clean
+
+    # Parantez içi açıklamalar varsa ayırıp temel madde adını temizle
+    base_clean = re.sub(r"\s*\(.*?\)\s*", " ", clean).strip()
+    key = re.sub(r"\s+", " ", base_clean.lower())
+    if key in PHARMA_TR_EN:
+        return PHARMA_TR_EN[key]
+
+    api_key = st.secrets.get("GEMINI_API_KEY", None)
+    if not api_key:
+        return base_clean
+
+    # Çeviri işlemi için en hızlı çalışan modeli öne al
+    fast_models = sorted(
+        available_models if available_models else ["gemini-3.8-flash"],
+        key=lambda x: (0 if "lite" in x.lower() else (1 if "flash" in x.lower() else 2))
+    )
+
+    try:
+        client = genai.Client(api_key=api_key)
+        prompt = (
+            "Convert the following Turkish or international drug/steroid/chemical name into its "
+            "standard English INN/PubMed pharmacological name. "
+            "If it is already in English, return it unchanged. "
+            "Output ONLY the clean English name without quotes, explanations, or punctuation.\n"
+            f"Name: {base_clean}"
+        )
+        for m_name in fast_models[:4]:
+            try:
+                resp = client.models.generate_content(model=m_name, contents=prompt)
+                if resp and resp.text:
+                    en_name = resp.text.strip().splitlines()[0].strip(" .\"'*`")
+                    if 2 <= len(en_name) <= 60:
+                        return en_name
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    return base_clean
 
 # --- APA 7 YAZAR FORMATLAMA YARDIMCISI ---
 def format_apa_authors(author_elements):
@@ -111,7 +255,7 @@ def search_pubmed(term1, term2, max_per_query=3, years_back=10):
         ]
         for idx, (q, label) in enumerate(queries):
             if idx > 0:
-                time.sleep(0.45)  # PubMed 3 istek/sn sınırına takılmamak için
+                time.sleep(0.45)
             params = {
                 "db": "pubmed",
                 "term": q,
@@ -134,7 +278,6 @@ def search_pubmed(term1, term2, max_per_query=3, years_back=10):
     pmids, search_notes = run_queries(start_year)
     range_label = f"{start_year}–{current_year}"
 
-    # Son 10 yılda yeterli makale bulunamazsa otomatik son 20 yıla genişlet
     if len(pmids) < 2:
         time.sleep(0.6)
         fallback_start = current_year - 20
@@ -144,7 +287,6 @@ def search_pubmed(term1, term2, max_per_query=3, years_back=10):
             search_notes = notes_20
             range_label = f"{fallback_start}–{current_year} (Son 10 yıl verisi kısıtlı olduğu için genişletildi)"
 
-    # Hâlâ sonuç yoksa tarih filtresiz son tarama yap
     if not pmids:
         time.sleep(0.6)
         pmids_all, notes_all = run_queries(None)
@@ -154,7 +296,7 @@ def search_pubmed(term1, term2, max_per_query=3, years_back=10):
             range_label = "Tüm Yıllar (Güncel veri kısıtlı olduğu için genişletildi)"
 
     if not pmids:
-        return [], f"PubMed üzerinde ({range_label}) eşleşen açık makale bulunamadı."
+        return [], f"PubMed Sorgusu: {term1} + {term2} | {range_label} aralığında açık makale bulunamadı."
 
     articles = []
     time.sleep(0.45)
@@ -239,9 +381,8 @@ def search_pubmed(term1, term2, max_per_query=3, years_back=10):
     except Exception as e:
         return [], f"PubMed XML işleme hatası: {str(e)}"
 
-    # En alakalı bulunan makaleleri en güncelden (2026 -> 2016) eskiye sırala
     articles.sort(key=lambda x: x["year_num"], reverse=True)
-    summary_note = f"Tarih Aralığı: {range_label} | " + " • ".join(search_notes)
+    summary_note = f"PubMed Sorgusu: {term1} + {term2} | Tarih: {range_label} | " + " • ".join(search_notes)
     return articles, summary_note
 
 # --- YAPAY ZEKA ÇIKTISINI GÜVENLİ BÖLÜMLEME ---
@@ -258,14 +399,12 @@ def parse_ai_response(raw_text):
     notes_block = extract_tag("MAKALE_NOTLARI", raw_text)
     report = extract_tag("RAPOR", raw_text, allow_unclosed=True)
 
-    # Eğer [RAPOR] etiketi hiç bulunamazsa ham metinden üst etiketleri temizleyip raporu kurtar
     if not report:
         cleaned = raw_text
         for tag in ["RISK_SINIFI", "RISK_OZET", "MAKALE_NOTLARI"]:
             cleaned = re.sub(rf"\[{tag}\].*?\[/{tag}\]", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
         report = cleaned.strip()
 
-    # Rapor içine sızmış olabilecek her türlü iç etiketi kesin olarak sil
     for tag in ["RISK_SINIFI", "RISK_OZET", "MAKALE_NOTLARI"]:
         report = re.sub(rf"\[{tag}\].*?\[/{tag}\]", "", report, flags=re.DOTALL | re.IGNORECASE)
     report = re.sub(r"\[/?(?:RISK_SINIFI|RISK_OZET|MAKALE_NOTLARI|RAPOR)\]", "", report, flags=re.IGNORECASE).strip()
@@ -284,8 +423,12 @@ def parse_ai_response(raw_text):
         "article_reasons": article_reasons
     }
 
-# --- GEMINI AI SENTEZ FONKSİYONU (AKILLI YEDEKLEMELİ) ---
-def generate_ai_report(substance1, substance2, scenario, articles, in_silico_context=None):
+# --- GEMINI AI SENTEZ FONKSİYONU (MODEL SEÇİCİLİ & AKILLI YEDEKLEMELİ) ---
+def generate_ai_report(
+    substance1, substance2, scenario, articles,
+    selected_model_option, available_models, allow_fallback=True,
+    in_silico_context=None, pubmed_terms=None
+):
     api_key = st.secrets.get("GEMINI_API_KEY", None)
     if not api_key:
         return {"ok": False, "error": "⚠️ Streamlit Secrets içinde 'GEMINI_API_KEY' bulunamadı."}
@@ -299,11 +442,12 @@ def generate_ai_report(substance1, substance2, scenario, articles, in_silico_con
         lit_text = "PubMed taramasında doğrudan eşleşen makale özeti bulunamadı."
 
     silico_block = f"\n**In Silico Veri Seti Bulguları:**\n{in_silico_context}\n" if in_silico_context else ""
+    pubmed_block = f" (PubMed İngilizce Terimler: {pubmed_terms[0]} + {pubmed_terms[1]})" if pubmed_terms else ""
 
     prompt = f"""
 Sen uzman bir klinik toksikolog ve farmakologsun. Aşağıdaki iki madde arasındaki olası ilaç-ilaç veya steroid-ilaç etkileşimini ve organ toksisitesi (özellikle hepatotoksisite / DILI) riskini akademik, net ve kanıta dayalı bir Türkçe ile analiz et.
 
-**İncelenen Maddeler:** {substance1} + {substance2}
+**İncelenen Maddeler:** {substance1} + {substance2}{pubmed_block}
 **Kullanım / Doz Senaryosu:** {scenario}
 {silico_block}
 **PubMed Canlı Literatür Taraması Sonuçları (En güncelden eskiye):**
@@ -341,48 +485,20 @@ Kurallar:
 
     try:
         client = genai.Client(api_key=api_key)
+        all_models = available_models if available_models else ["gemini-3.8-flash"]
 
-        candidate_models = []
-        try:
-            for m in client.models.list():
-                short_name = getattr(m, "name", "").replace("models/", "")
-                actions = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", None) or []
-                lower_name = short_name.lower()
-
-                is_gemini = "gemini" in lower_name
-                is_excluded = any(x in lower_name for x in [
-                    "embedding", "imagen", "veo", "tts", "audio", "image",
-                    "aqa", "robotics", "computer-use", "live", "deep-research"
-                ])
-                supports_gen = (not actions) or ("generateContent" in actions)
-
-                if is_gemini and not is_excluded and supports_gen:
-                    candidate_models.append(short_name)
-        except Exception:
-            candidate_models = ["gemini-3.8-flash"]
-
-        def model_priority(name):
-            n = name.lower()
-            if "lite" in n and "preview" not in n:
-                return 0
-            if "lite" in n:
-                return 1
-            if "flash" in n and "3.8" not in n and "preview" not in n:
-                return 2
-            if "flash" in n and "3.8" not in n:
-                return 3
-            if "3.8-flash" in n:
-                return 4
-            if "flash" in n:
-                return 5
-            return 6
-
-        candidate_models = sorted(list(dict.fromkeys(candidate_models)), key=model_priority)
-        if not candidate_models:
-            candidate_models = ["gemini-3.8-flash"]
+        if selected_model_option == "⚡ Otomatik (En Güçlü Çalışan)":
+            models_to_try = all_models[:10]
+            manual_choice = None
+        else:
+            manual_choice = selected_model_option
+            if allow_fallback:
+                models_to_try = [manual_choice] + [m for m in all_models if m != manual_choice][:9]
+            else:
+                models_to_try = [manual_choice]
 
         last_error = ""
-        for model_name in candidate_models[:6]:
+        for model_name in models_to_try:
             for attempt in range(2):
                 try:
                     response = client.models.generate_content(
@@ -393,19 +509,28 @@ Kurallar:
                         parsed = parse_ai_response(response.text)
                         parsed["ok"] = True
                         parsed["model"] = model_name
+                        parsed["fallback_used"] = bool(manual_choice and model_name != manual_choice)
+                        parsed["requested_model"] = manual_choice
                         return parsed
                 except Exception as e:
                     last_error = f"{model_name}: {str(e)}"
-                    err_str = str(e)
-                    if "503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str:
-                        if attempt == 0:
-                            time.sleep(2)
-                            continue
+                    err_str = str(e).lower()
+                    # Ücretli kota / erişim / bulunamadı hatalarında beklemeden anında sonraki modele geç
+                    if any(k in err_str for k in ["limit: 0", "403", "404", "not_found", "permission", "billing"]):
+                        break
+                    # Geçici yoğunlukta 1 kez kısa bekle
+                    if ("503" in err_str or "unavailable" in err_str) and attempt == 0:
+                        time.sleep(1.5)
+                        continue
                     break
 
         return {
             "ok": False,
-            "error": f"❌ Uygun modeller şu an meşgul. Denenenler: {', '.join(candidate_models[:6])}\n\nSon hata: {last_error}"
+            "error": (
+                f"❌ Seçilen yapay zeka modeli şu an yanıt veremedi (ücretsiz kota sınırı veya geçici yoğunluk). "
+                f"Sol menüden farklı bir model seçebilir veya 'Otomatik Yedekleme'yi açık bırakabilirsiniz.\n\n"
+                f"Son teknik mesaj: {last_error}"
+            )
         }
     except Exception as e:
         return {"ok": False, "error": f"❌ Yapay zeka analizi sırasında bir hata oluştu: {str(e)}"}
@@ -434,7 +559,7 @@ def render_bibliography(articles, note, article_reasons):
     st.markdown("### 📖 Kaynakça (APA 7 Formatı — En Güncelden Eskiye)")
     st.caption(note)
     if not articles:
-        st.info("Bu sorgu için PubMed'den makale çekilemedi. Etken madde adlarını İngilizce olarak kontrol edip tekrar deneyebilirsiniz.")
+        st.info("Bu sorgu için PubMed'den makale çekilemedi. Farklı bir etken madde yazımı ile tekrar deneyebilirsiniz.")
         return
     for idx, art in enumerate(articles, 1):
         st.markdown(f"{idx}. {art['apa']}")
@@ -442,9 +567,46 @@ def render_bibliography(articles, note, article_reasons):
         if reason:
             st.caption(f"🎯 **Seçim / Uyumluluk Nedeni:** {reason}")
 
-# --- ANA UYGULAMA ARAYÜZÜ ---
+# ==========================================================
+# SOL MENÜ (SIDEBAR): MODEL SEÇİCİ & BİLİMSEL METODOLOJİ
+# ==========================================================
+available_models = get_available_models()
+
+with st.sidebar:
+    st.header("⚙️ Yapay Zeka & Sistem Ayarları")
+
+    model_options = ["⚡ Otomatik (En Güçlü Çalışan)"] + available_models
+    selected_model = st.selectbox(
+        "🤖 Yapay Zeka Modeli",
+        options=model_options,
+        help="Otomatik mod, API anahtarınıza açık olan en güçlü modelden başlayarak yanıt verebilen ilk modeli seçer."
+    )
+
+    allow_fallback = st.checkbox(
+        "Seçili model meşgulse yedek modele geç",
+        value=True,
+        help="Sunum sırasında yoğunluk (503) veya ücretli katman kotasına takılmamak için açık tutmanız önerilir."
+    )
+
+    st.caption(
+        "💡 *Not: Pro / Carbon / Argon modelleri API'de ücretli (kullandığın kadar öde) katman gerektirebilir. "
+        "Ücretsiz anahtarda sistem otomatik olarak en güçlü açık modele yönlenir.*"
+    )
+
+    st.divider()
+    st.markdown("### ⚖️ Metodoloji & RAG Güvenilirliği")
+    st.info(
+        "**Kanıta Dayalı Mimari (RAG):** Bu platform, yapay zekanın ezberine güvenmek yerine "
+        "NCBI **PubMed E-utilities** üzerinden son 10 yılın hakemli makale özetlerini canlı çeker, "
+        "*in silico* verilerle (SwissADME / ProTox-III) sentezler ve her kaynağı tıklanabilir **APA 7 (DOI/PMID)** "
+        "linkiyle doğrulanabilir biçimde sunar."
+    )
+
+# ==========================================================
+# ANA UYGULAMA ARAYÜZÜ
+# ==========================================================
 st.title("🧪 In Silico & AI Toksisite Risk Analizi")
-st.markdown("#### Anabolik Steroid ve OTC Risk Taraması ")
+st.markdown("#### İleri Düzey Farmakolojik Araştırma ve Canlı Literatür Platformu")
 
 df = load_data()
 
@@ -497,8 +659,11 @@ with tab1:
             st.divider()
             st.markdown("### 🤖 Yapay Zeka & Canlı PubMed Literatür Sentezi")
             if st.button("📚 PubMed Literatürü Tara & AI Yorumu Oluştur", key="ai_btn_tab1"):
-                with st.spinner("Son 10 yılın PubMed literatürü taranıyor ve bilimsel sentez hazırlanıyor..."):
-                    articles, note = search_pubmed(selected_steroid, selected_drug)
+                with st.spinner("Türkçe etken maddeler uluslararası PubMed terimlerine çevriliyor ve son 10 yıl taranıyor..."):
+                    en_steroid = translate_drug_for_pubmed(selected_steroid, available_models)
+                    en_drug = translate_drug_for_pubmed(selected_drug, available_models)
+                    articles, note = search_pubmed(en_steroid, en_drug)
+
                     silico_summary = (
                         f"- Etiketlenen Risk Sınıfı: {risk_class}\n"
                         f"- Kombinasyon Mekanizması: {mekanizma}\n"
@@ -506,10 +671,21 @@ with tab1:
                         f"- Ek İlaç ProTox-III Hepatotoksisite: {protox}"
                     )
                     ai_res = generate_ai_report(
-                        selected_steroid, selected_drug, selected_dose, articles, silico_summary
+                        selected_steroid, selected_drug, selected_dose, articles,
+                        selected_model, available_models, allow_fallback,
+                        in_silico_context=silico_summary,
+                        pubmed_terms=(en_steroid, en_drug)
                     )
                     if ai_res["ok"]:
-                        st.caption(f"*(Aktif AI Modeli: `{ai_res['model']}`)*")
+                        st.caption(
+                            f"**Aktif AI Modeli:** `{ai_res['model']}` | "
+                            f"**PubMed Sorgu Terimleri:** `{en_steroid}` + `{en_drug}`"
+                        )
+                        if ai_res.get("fallback_used"):
+                            st.info(
+                                f"ℹ️ Seçtiğiniz `{ai_res['requested_model']}` modeli şu an meşgul veya ücretsiz kota dışında olduğu için "
+                                f"otomatik olarak `{ai_res['model']}` modeli kullanıldı."
+                            )
                         st.markdown(ai_res["report"])
                         render_bibliography(articles, note, ai_res["article_reasons"])
                     else:
@@ -521,12 +697,12 @@ with tab1:
 
 # === SEKME 2: VERİ SETİNDE OLMAYAN MADDELER İÇİN CANLI SORGU ===
 with tab2:
-    st.markdown("Veri setinizde yer almayan herhangi iki etken maddeyi yazarak doğrudan **PubMed (Son 10 Yıl) + Yapay Zeka** üzerinden anlık ön risk taraması yapabilirsiniz.")
+    st.markdown("Veri setinizde yer almayan herhangi iki etken maddeyi Türkçe veya İngilizce yazarak **PubMed (Son 10 Yıl) + Yapay Zeka** üzerinden anlık ön risk taraması yapabilirsiniz.")
     s_col1, s_col2, s_col3 = st.columns(3)
     with s_col1:
-        custom_sub1 = st.text_input("1. Etken Madde (İngilizce önerilir)", placeholder="Örn: Trenbolone")
+        custom_sub1 = st.text_input("1. Etken Madde (TR / EN)", placeholder="Örn: Trenbolon veya Trenbolone")
     with s_col2:
-        custom_sub2 = st.text_input("2. Etken Madde (İngilizce önerilir)", placeholder="Örn: Paracetamol")
+        custom_sub2 = st.text_input("2. Etken Madde (TR / EN)", placeholder="Örn: Parasetamol veya Isotretinoin")
     with s_col3:
         custom_scenario = st.selectbox(
             "Maruziyet Senaryosu",
@@ -535,15 +711,29 @@ with tab2:
 
     if st.button("🚀 Canlı Literatür Tara ve Analiz Et", key="ai_btn_tab2"):
         if custom_sub1.strip() and custom_sub2.strip():
-            with st.spinner(f"{custom_sub1} + {custom_sub2} için son 10 yılın PubMed literatürü taranıyor..."):
-                articles, note = search_pubmed(custom_sub1.strip(), custom_sub2.strip())
+            with st.spinner(f"{custom_sub1} + {custom_sub2} için uluslararası PubMed literatürü taranıyor..."):
+                en_sub1 = translate_drug_for_pubmed(custom_sub1.strip(), available_models)
+                en_sub2 = translate_drug_for_pubmed(custom_sub2.strip(), available_models)
+                articles, note = search_pubmed(en_sub1, en_sub2)
+
                 ai_res = generate_ai_report(
-                    custom_sub1.strip(), custom_sub2.strip(), custom_scenario, articles
+                    custom_sub1.strip(), custom_sub2.strip(), custom_scenario, articles,
+                    selected_model, available_models, allow_fallback,
+                    pubmed_terms=(en_sub1, en_sub2)
                 )
                 if ai_res["ok"]:
                     st.divider()
                     st.subheader(f"📋 Canlı Analiz Raporu: {custom_sub1.strip()} + {custom_sub2.strip()}")
-                    st.caption(f"**Seçilen Senaryo:** {custom_scenario} | **Aktif AI Modeli:** `{ai_res['model']}`")
+                    st.caption(
+                        f"**Seçilen Senaryo:** {custom_scenario} | "
+                        f"**Aktif AI Modeli:** `{ai_res['model']}` | "
+                        f"**PubMed Sorgu Terimleri:** `{en_sub1}` + `{en_sub2}`"
+                    )
+                    if ai_res.get("fallback_used"):
+                        st.info(
+                            f"ℹ️ Seçtiğiniz `{ai_res['requested_model']}` modeli şu an meşgul veya ücretsiz kota dışında olduğu için "
+                            f"otomatik olarak `{ai_res['model']}` modeli kullanıldı."
+                        )
 
                     render_risk_banner(ai_res["risk_level"], ai_res["risk_summary"])
                     st.markdown(ai_res["report"])
@@ -552,3 +742,13 @@ with tab2:
                     st.error(ai_res["error"])
         else:
             st.warning("Lütfen her iki etken madde kutusunu da doldurun.")
+
+# --- ALT BİLGİ: BİLİMSEL METODOLOJİ & KARAR DESTEK UYARISI ---
+st.divider()
+with st.expander("⚖️ Bilimsel Metodoloji, Doğrulama Protokolü ve Yasal Uyarı"):
+    st.markdown("""
+    * **Canlı Literatür Destekli Sentez (RAG):** Yapay zeka yanıtları yalnızca modelin eğitim verisine dayanmaz; her sorguda **NCBI PubMed E-utilities API** aracılığıyla son 10 yılın hakemli makale özetleri (abstract) gerçek zamanlı taranır ve en güncelden eskiye sıralanır.
+    * **Akut *In Silico* ve Kronik Maruziyet Farkı:** SwissADME ve ProTox-III gibi *in silico* tarama araçları ağırlıklı olarak akut yapısal toksisiteyi ve CYP450 inhibisyonunu modeller. Bu nedenle *in silico* taramada negatif görünen bir kombinasyon, uzun süreli kronik maruziyet, kümülatif oksidatif stres veya idiyosinkratik DILI mekanizmalarıyla klinik risk taşıyabilir.
+    * **Kaynak Doğrulama:** Üretilen tüm akademik çıkarımlar metin içi APA 7 atıfları ve doğrudan tıklanabilir **DOI / PubMed** bağlantıları ile şeffaf biçimde denetlenebilir.
+    * **Karar Destek Sınırı:** Bu platform, toksikoloji ve farmakoloji araştırmaları için geliştirilmiş bir *in silico* karar destek prototipidir; doğrudan klinik tanı, tedavi veya reçeteleme yerine geçmez.
+    """)
