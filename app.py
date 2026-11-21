@@ -234,13 +234,72 @@ Sen uzman bir klinik toksikolog ve farmakologsun. Aşağıdaki iki madde arasın
 4. Raporun sonuna ayrıca kaynakça listesi ekleme (sistem aşağıda otomatik APA 7 kaynakça listesini tıklanabilir linklerle basacaktır).
 """
 
+        import time
     try:
         client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt
-        )
-        return response.text
+
+        # API anahtarına açık tüm uygun Gemini modellerini canlı listele
+        candidate_models = []
+        try:
+            for m in client.models.list():
+                short_name = getattr(m, "name", "").replace("models/", "")
+                actions = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", None) or []
+                lower_name = short_name.lower()
+
+                is_gemini = "gemini" in lower_name
+                is_excluded = any(x in lower_name for x in [
+                    "embedding", "imagen", "veo", "tts", "audio", "image",
+                    "aqa", "robotics", "computer-use", "live", "deep-research"
+                ])
+                supports_gen = (not actions) or ("generateContent" in actions)
+
+                if is_gemini and not is_excluded and supports_gen:
+                    candidate_models.append(short_name)
+        except Exception:
+            candidate_models = ["gemini-3.8-flash"]
+
+        # Yoğunluğa takılmamak için önce lite ve alternatif flash modellerini öne al
+        def model_priority(name):
+            n = name.lower()
+            if "lite" in n and "preview" not in n:
+                return 0
+            if "lite" in n:
+                return 1
+            if "flash" in n and "3.8" not in n and "preview" not in n:
+                return 2
+            if "flash" in n and "3.8" not in n:
+                return 3
+            if "3.8-flash" in n:
+                return 4
+            if "flash" in n:
+                return 5
+            return 6
+
+        candidate_models = sorted(list(dict.fromkeys(candidate_models)), key=model_priority)
+        if not candidate_models:
+            candidate_models = ["gemini-3.8-flash"]
+
+        last_error = ""
+        # Uygun modelleri sırayla dene; 503/yoğunluk hatasında anında diğerine geç
+        for model_name in candidate_models[:6]:
+            for attempt in range(2):
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt
+                    )
+                    if response and response.text:
+                        return f"*(Aktif AI Modeli: `{model_name}`)*\n\n{response.text}"
+                except Exception as e:
+                    last_error = f"{model_name}: {str(e)}"
+                    err_str = str(e)
+                    if "503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str:
+                        if attempt == 0:
+                            time.sleep(2)
+                            continue
+                    break
+
+        return f"❌ Uygun modeller şu an meşgul. Denenenler: {', '.join(candidate_models[:6])}\n\nSon hata: {last_error}"
     except Exception as e:
         return f"❌ Yapay zeka analizi sırasında bir hata oluştu: {str(e)}"
 
