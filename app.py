@@ -234,7 +234,7 @@ Sen uzman bir klinik toksikolog ve farmakologsun. Aşağıdaki iki madde arasın
 4. Raporun sonuna ayrıca kaynakça listesi ekleme (sistem aşağıda otomatik APA 7 kaynakça listesini tıklanabilir linklerle basacaktır).
 """
 
-        import time
+    import time
     try:
         client = genai.Client(api_key=api_key)
 
