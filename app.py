@@ -606,7 +606,7 @@ with st.sidebar:
 # ANA UYGULAMA ARAYÜZÜ
 # ==========================================================
 st.title("🧪 In Silico & AI Toksisite Risk Analizi")
-st.markdown("#### İleri Düzey Farmakolojik Araştırma ve Canlı Literatür Platformu")
+st.markdown("#### Farmasötik Toksikoloji Literatür Platformu")
 
 df = load_data()
 
